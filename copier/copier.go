@@ -198,6 +198,15 @@ func (req *request) Excludes() []string {
 	}
 }
 
+func (req *request) Includes() []string {
+	switch req.Request {
+	case requestGet:
+		return req.GetOptions.Includes
+	default:
+		return nil
+	}
+}
+
 func (req *request) UIDMap() []idtools.IDMap {
 	switch req.Request {
 	case requestEval:
@@ -405,6 +414,7 @@ type GetOptions struct {
 	Timestamp          *time.Time        // timestamp to force on all contents
 	DisallowWildcard   bool              // reject glob patterns in source paths
 	AllowEmptyWildcard bool              // don't error when glob patterns match nothing
+	Includes           []string          // include only contents matching at least one of these patterns; Excludes take precedence
 }
 
 // Get produces an archive containing items that match the specified glob
@@ -1072,9 +1082,17 @@ func copierHandler(bulkReader io.Reader, bulkWriter io.Writer, req request) (*re
 	// os.PathSeparator, implying that it expects OS-specific naming
 	// conventions.
 	excludes := req.Excludes()
-	pm, err := fileutils.NewPatternMatcher(excludes)
+	pmExcludes, err := fileutils.NewPatternMatcher(excludes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("processing excludes list %v: %w", excludes, err)
+	}
+
+	var pmIncludes *fileutils.PatternMatcher
+	if includes := req.Includes(); len(includes) > 0 {
+		pmIncludes, err = fileutils.NewPatternMatcher(includes)
+		if err != nil {
+			return nil, nil, fmt.Errorf("processing includes list %v: %w", includes, err)
+		}
 	}
 
 	var idMappings *idtools.IDMappings
@@ -1090,10 +1108,10 @@ func copierHandler(bulkReader io.Reader, bulkWriter io.Writer, req request) (*re
 		resp := copierHandlerEval(req)
 		return resp, nil, nil
 	case requestStat:
-		resp := copierHandlerStat(req, pm, idMappings)
+		resp := copierHandlerStat(req, pmExcludes, idMappings)
 		return resp, nil, nil
 	case requestGet:
-		return copierHandlerGet(bulkWriter, req, pm, idMappings)
+		return copierHandlerGet(bulkWriter, req, pmExcludes, pmIncludes, idMappings)
 	case requestPut:
 		return copierHandlerPut(bulkReader, req, idMappings)
 	case requestMkdir:
@@ -1138,6 +1156,28 @@ func pathIsExcluded(root, path string, pm *fileutils.PatternMatcher) (string, bo
 		return rel, true, nil
 	}
 	return rel, false, nil
+}
+
+func pathIsIncluded(root, path string, pm *fileutils.PatternMatcher) (bool, error) {
+	rel, err := convertToRelSubdirectory(root, path)
+	if err != nil {
+		return false, fmt.Errorf("copier: error computing path of %q relative to root %q: %w", path, root, err)
+	}
+	if pm == nil {
+		return true, nil
+	}
+	if rel == "." {
+		// special case
+		return true, nil
+	}
+	// Matches uses filepath.FromSlash() to convert candidates before
+	// checking if they match the patterns it's been given, implying that
+	// it expects Unix-style paths.
+	matches, err := pm.Matches(filepath.ToSlash(rel)) //nolint:staticcheck
+	if err != nil {
+		return false, fmt.Errorf("copier: error checking if %q is included: %w", rel, err)
+	}
+	return matches, nil
 }
 
 // resolvePath resolves symbolic links in paths, treating the specified
@@ -1221,7 +1261,7 @@ func containsWildcards(path string) bool {
 	return strings.ContainsAny(path, "*?[")
 }
 
-func copierHandlerStat(req request, pm *fileutils.PatternMatcher, idMappings *idtools.IDMappings) *response {
+func copierHandlerStat(req request, pmExcludes *fileutils.PatternMatcher, idMappings *idtools.IDMappings) *response {
 	errorResponse := func(fmtspec string, args ...any) *response {
 		return &response{Error: fmt.Sprintf(fmtspec, args...), Stat: statResponse{}}
 	}
@@ -1250,7 +1290,7 @@ func copierHandlerStat(req request, pm *fileutils.PatternMatcher, idMappings *id
 		s.Globbed = make([]string, 0, len(globMatched))
 		s.Results = make(map[string]*StatForItem)
 		for _, globbed := range globMatched {
-			rel, excluded, err := pathIsExcluded(req.Root, globbed, pm)
+			rel, excluded, err := pathIsExcluded(req.Root, globbed, pmExcludes)
 			if err != nil {
 				return errorResponse("copier: stat: %v", err)
 			}
@@ -1310,7 +1350,7 @@ func copierHandlerStat(req request, pm *fileutils.PatternMatcher, idMappings *id
 				// could be a relative link) and in the context
 				// of the chroot
 				result.ImmediateTarget = immediateTarget
-				resolvedTarget, err := resolvePath(req.Root, globbed, true, pm)
+				resolvedTarget, err := resolvePath(req.Root, globbed, true, pmExcludes)
 				if err != nil {
 					return errorResponse("copier: stat: error resolving %q: %v", globbed, err)
 				}
@@ -1403,8 +1443,8 @@ func checkLinks(item string, req request, info os.FileInfo) (string, os.FileInfo
 	return item, info, nil
 }
 
-func copierHandlerGet(bulkWriter io.Writer, req request, pm *fileutils.PatternMatcher, idMappings *idtools.IDMappings) (*response, func() error, error) {
-	statResponse := copierHandlerStat(req, pm, idMappings)
+func copierHandlerGet(bulkWriter io.Writer, req request, pmExcludes, pmIncludes *fileutils.PatternMatcher, idMappings *idtools.IDMappings) (*response, func() error, error) {
+	statResponse := copierHandlerStat(req, pmExcludes, idMappings)
 	errorResponse := func(fmtspec string, args ...any) (*response, func() error, error) {
 		return &response{Error: fmt.Sprintf(fmtspec, args...), Stat: statResponse.Stat, Get: getResponse{}}, nil, nil
 	}
@@ -1570,7 +1610,7 @@ func copierHandlerGet(bulkWriter io.Writer, req request, pm *fileutils.PatternMa
 						// skip the "." entry
 						return nil
 					}
-					skippedPath, skip, err := pathIsExcluded(req.Root, path, pm)
+					skippedPath, skip, err := pathIsExcluded(req.Root, path, pmExcludes)
 					if err != nil {
 						return err
 					}
@@ -1581,14 +1621,14 @@ func copierHandlerGet(bulkWriter io.Writer, req request, pm *fileutils.PatternMa
 							// all, we don't need to
 							// descend into this particular
 							// directory if it's a directory
-							if !pm.Exclusions() {
+							if !pmExcludes.Exclusions() {
 								return filepath.SkipDir
 							}
 							// if there are exclusion
 							// patterns for which this
 							// path is a prefix, we
 							// need to keep descending
-							for _, pattern := range pm.Patterns() {
+							for _, pattern := range pmExcludes.Patterns() {
 								if !pattern.Exclusion() {
 									continue
 								}
@@ -1610,6 +1650,16 @@ func copierHandlerGet(bulkWriter io.Writer, req request, pm *fileutils.PatternMa
 						// something under it might
 						// also be in the excludes list
 						return nil
+					}
+					if pmIncludes != nil && !d.IsDir() {
+						included, err := pathIsIncluded(req.Root, path, pmIncludes)
+						if err != nil {
+							return err
+						}
+
+						if !included {
+							return nil
+						}
 					}
 					// if it's a symlink, read its target
 					symlinkTarget := ""
@@ -1656,12 +1706,22 @@ func copierHandlerGet(bulkWriter io.Writer, req request, pm *fileutils.PatternMa
 				}
 				itemsCopied++
 			} else {
-				_, skip, err := pathIsExcluded(req.Root, item, pm)
+				_, skip, err := pathIsExcluded(req.Root, item, pmExcludes)
 				if err != nil {
 					return err
 				}
 				if skip {
 					continue
+				}
+
+				if pmIncludes != nil {
+					included, err := pathIsIncluded(req.Root, item, pmIncludes)
+					if err != nil {
+						return err
+					}
+					if !included {
+						continue
+					}
 				}
 
 				name := filepath.Base(queue[i].glob)

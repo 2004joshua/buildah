@@ -807,3 +807,45 @@ parents/y/b.txt"
   run_buildah 125 copy --allow-empty-wildcard=true $cid ${TEST_SCRATCH_DIR}/no-such-file /dest4/
   expect_output --substring "no such file or directory"
 }
+
+@test "copy --include" {
+  mytest=${TEST_SCRATCH_DIR}/mytest
+  mkdir -p ${mytest}/subdir
+  touch ${mytest}/source.go
+  touch ${mytest}/readme.md
+  touch ${mytest}/subdir/nested.go
+  touch ${mytest}/subdir/nested.md
+
+  # recursive include: **/*.go keeps .go at all depths, drops .md
+expect="
+stuff
+stuff/source.go
+stuff/subdir
+stuff/subdir/nested.go"
+
+  run_buildah from $WITH_POLICY_JSON scratch
+  cid=$output
+  run_buildah copy --include="**/*.go" $cid ${mytest} /stuff
+  run_buildah_mount $cid
+  mnt=$output
+  run find $mnt -printf "%P\n"
+  filelist=$(LC_ALL=C sort <<<"$output")
+  run_buildah_umount $cid
+  expect_output --from="$filelist" "$expect" "recursive include"
+
+  # include + exclude: exclude wins when both match
+expect="
+stuff
+stuff/source.go
+stuff/subdir"
+
+  run_buildah from $WITH_POLICY_JSON scratch
+  cid=$output
+  run_buildah copy --include="**/*.go" --exclude="**/nested.go" $cid ${mytest} /stuff
+  run_buildah_mount $cid
+  mnt=$output
+  run find $mnt -printf "%P\n"
+  filelist=$(LC_ALL=C sort <<<"$output")
+  run_buildah_umount $cid
+  expect_output --from="$filelist" "$expect" "include with exclude"
+}
