@@ -415,6 +415,7 @@ type GetOptions struct {
 	DisallowWildcard   bool              // reject glob patterns in source paths
 	AllowEmptyWildcard bool              // don't error when glob patterns match nothing
 	Includes           []string          // include only contents matching at least one of these patterns; Excludes take precedence
+	RequiredPaths      []string          // When using includes, you can specify required paths needed when copying
 }
 
 // Get produces an archive containing items that match the specified glob
@@ -1508,6 +1509,7 @@ func copierHandlerGet(bulkWriter io.Writer, req request, pmExcludes, pmIncludes 
 		defer tw.Close()
 		hardlinkChecker := new(hardlinkChecker)
 		itemsCopied := 0
+		reqPaths := map[string]struct{}{}
 		addedParents := map[string]struct{}{}
 		for i, qItem := range queue {
 			item := qItem.glob
@@ -1688,6 +1690,11 @@ func copierHandlerGet(bulkWriter io.Writer, req request, pmExcludes, pmIncludes 
 							return fmt.Errorf("copier: get: error computing path of %q relative to %q: %w", path, req.Root, err)
 						}
 					}
+
+					if req.GetOptions.RequiredPaths != nil {
+						reqPaths[filepath.ToSlash(rel)] = struct{}{}
+					}
+
 					// add the item to the outgoing tar stream
 					if err := copierHandlerGetOne(info, symlinkTarget, rel, path, options, tw, hardlinkChecker, idMappings, chmod); err != nil {
 						if req.GetOptions.IgnoreUnreadable && errorIsPermission(err) {
@@ -1736,6 +1743,10 @@ func copierHandlerGet(bulkWriter io.Writer, req request, pmExcludes, pmIncludes 
 					}
 				}
 
+				if req.GetOptions.RequiredPaths != nil {
+					reqPaths[filepath.ToSlash(name)] = struct{}{}
+				}
+
 				symlinkTarget, err := getTargetIfSymlink(item, info)
 				if err != nil {
 					return fmt.Errorf("copier: get: %w", err)
@@ -1752,6 +1763,16 @@ func copierHandlerGet(bulkWriter io.Writer, req request, pmExcludes, pmIncludes 
 		}
 		if itemsCopied == 0 && !req.GetOptions.AllowEmptyWildcard {
 			return fmt.Errorf("copier: get: copied no items: %w", syscall.ENOENT)
+		}
+
+		var missingReqPaths []string
+		for _, required := range req.GetOptions.RequiredPaths {
+			if _, ok := reqPaths[filepath.ToSlash(required)]; !ok {
+				missingReqPaths = append(missingReqPaths, required)
+			}
+		}
+		if len(missingReqPaths) > 0 {
+			return fmt.Errorf("copier: get: missing required path(s): %v", missingReqPaths)
 		}
 		return nil
 	}

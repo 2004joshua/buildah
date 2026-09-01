@@ -101,6 +101,16 @@ instead of dereferencing the link and copying the contents of the target.
 
 Refrain from printing a digest of the added content.
 
+**--required-path** *path*
+
+Require that *path* be present among the items selected for copying, as a safety check
+against **--include** patterns that don't match what was intended. It can be specified
+multiple times. Paths are matched against each item's path relative to the context
+directory being copied. Unlike **--include** and **--exclude**, this flag only accepts
+exact paths, not patterns. Requires **--include** to be specified. If a required path
+does not match anything selected by **--include**, or is dropped by **--exclude**, the
+operation fails.
+
 **--retry** *attempts*
 
 Number of times to retry in case of failure when pulling images from registries

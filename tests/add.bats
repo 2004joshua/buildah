@@ -721,3 +721,54 @@ stuff/subdir"
   run_buildah_umount $cid
   expect_output --from="$filelist" "$expect" "include with exclude"
 }
+
+@test "add --required-path" {
+    mytest=${TEST_SCRATCH_DIR}/mytest
+    mkdir -p ${mytest}/subdir
+    touch ${mytest}/source.go
+    touch ${mytest}/readme.md
+    touch ${mytest}/subdir/nested.go
+    touch ${mytest}/subdir/nested.md
+
+    # normal case: required path is selected by include
+    run_buildah from $WITH_POLICY_JSON scratch
+    cid=$output
+    run_buildah add --include="**/*.go" --required-path="source.go" $cid ${mytest} /stuff
+    run_buildah_mount $cid
+    mnt=$output
+    run find $mnt -printf "%P\n"
+    filelist=$(LC_ALL=C sort <<<"$output")
+    run_buildah_umount $cid
+    expect_output --from="$filelist" --substring "stuff/source.go" "required-path present succeeds"
+
+    # --required-path without --include should fail before copying happens
+    run_buildah from $WITH_POLICY_JSON scratch
+    cid=$output
+    run_buildah 125 add --required-path="source.go" $cid ${mytest} /stuff
+    expect_output --substring "needs the --include flag"
+
+    # --required-path matches an --include pattern but is also excluded: excluded wins
+    run_buildah from $WITH_POLICY_JSON scratch
+    cid=$output
+    run_buildah 125 add --include="**/*.go" --exclude="**/nested.go" --required-path="subdir/nested.go" $cid ${mytest} /stuff
+    expect_output --substring "missing required path"
+
+    # --required-path has a path not included in --include
+    run_buildah from $WITH_POLICY_JSON scratch
+    cid=$output
+    run_buildah 125 add --include="**/*.go" --required-path="readme.md" $cid ${mytest} /stuff
+    expect_output --substring "missing required path"
+
+    # --required-path is a directory
+    run_buildah from $WITH_POLICY_JSON scratch
+    cid=$output
+    run_buildah add --include="**/*.go" --required-path="subdir" $cid ${mytest} /stuff
+    run_buildah_mount $cid
+    mnt=$output
+    run find $mnt -printf "%P\n"
+    filelist=$(LC_ALL=C sort <<<"$output")
+    run_buildah_umount $cid
+    expect_output --from="$filelist" --substring "stuff/subdir" "required-path directory succeeds"
+}
+
+

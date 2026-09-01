@@ -130,6 +130,10 @@ type AddAndCopyOptions struct {
 	// Only items matching one of these patterns are copied. Has the same
 	// pattern format as lines of a .containerignore file.
 	Includes []string
+	// RequiredPaths is a list of relative paths that must be present among the items
+	// selected by Includes. If any of these paths does not match an item that would be
+	// copied, the operation will fail.
+	RequiredPaths []string
 }
 
 // getURL writes a tar archive containing the named content
@@ -623,6 +627,7 @@ func (b *Builder) Add(destination string, extract bool, options AddAndCopyOption
 						StripSetgidBit:     options.StripSetgidBit,
 						StripStickyBit:     options.StripStickyBit,
 						Timestamp:          options.Timestamp,
+						RequiredPaths:      options.RequiredPaths,
 					}
 					writer := io.WriteCloser(pipeWriter)
 					repositoryDir := filepath.Join(cloneDir, subdir)
@@ -780,6 +785,7 @@ func (b *Builder) Add(destination string, extract bool, options AddAndCopyOption
 					GIDMap:             srcGIDMap,
 					Excludes:           options.Excludes,
 					Includes:           options.Includes,
+					RequiredPaths:      options.RequiredPaths,
 					ExpandArchives:     extract,
 					Chmod:              options.Chmod,
 					ChownDirs:          chownDirs,
